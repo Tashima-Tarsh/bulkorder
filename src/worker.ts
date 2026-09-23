@@ -32,7 +32,10 @@ async function dispatchRow(row:any){
 
 const worker=new Worker("bulkorder-rows",async job=>{
   const rowId=String(job.data.rowId),importId=String(job.data.importId);
-  const claimed=await db.query("update import_rows set status='PROCESSING',error_message=null,updated_at=now() where id=$1 and status='QUEUED' returning *",[rowId]);
+  const claimed=await db.query(
+    "update import_rows set status='PROCESSING',error_message=null,updated_at=now() where id=$1 and (status='QUEUED' or (status='PROCESSING' and updated_at<now()-interval '2 minutes')) returning *",
+    [rowId]
+  );
   if(!claimed.rows[0]){
     const existing=await db.query("select status from import_rows where id=$1",[rowId]);
     if(["READY_FOR_EXECUTION","DISPATCHED"].includes(String(existing.rows[0]?.status)))return existing.rows[0];
