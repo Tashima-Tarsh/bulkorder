@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 COPY tsconfig.json ./
 COPY src ./src
 COPY test ./test
@@ -11,7 +11,7 @@ FROM node:24-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm install --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 3000
