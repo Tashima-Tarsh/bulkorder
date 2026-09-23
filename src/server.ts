@@ -1,129 +1,237 @@
 import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import { randomUUID } from "node:crypto";
-import { parseSpreadsheet, templateCsv } from "./importer.js";
+import { parseRecipients, templateCsv } from "./importer.js";
+import { fetchFlipkartProduct, validateFlipkartUrl } from "./product.js";
+import { renderUi } from "./ui.js";
 
-type TaskStatus="INVALID"|"READY"|"STARTED";
-type Task={
+type OrderStatus=
+  |"QUEUED"|"PRODUCT_CHECK"|"CART"|"ADDRESS"|"CARD_READY"|"PAYMENT"
+  |"OTP_REQUIRED"|"PAYMENT_AUTH_REQUIRED"|"CONFIRMING"|"CONFIRMED"|"FAILED";
+
+type Recipient={
   id:string; rowNumber:number; userId:string; fullName:string; mobile:string;
-  address:string; city:string; state:string; pincode:string; productUrl:string;
-  quantity:number; maxPriceMinor:number; status:TaskStatus; error?:string;
-};
-type ImportRecord={
-  id:string; filename:string; createdAt:string; tasks:Task[];
+  addressLine1:string; addressLine2:string; city:string; state:string; pincode:string;
 };
 
-const imports:ImportRecord[]=[];
+type Order={
+  id:string; sequence:number; userId:string; recipient:Recipient; quantity:number;
+  expectedMinor:number; maxMinor:number; cardLimitMinor:number; virtualCardRef:string;
+  cardStatus:"DEMO_READY"|"CONNECTOR_REQUIRED"; status:OrderStatus; authCleared:boolean;
+  demoOrderRef:string|null; updatedAt:string; history:{status:OrderStatus;at:string}[];
+};
+
+const state:{
+  product:null|{url:string;title:string;image:string|null;priceMinor:number|null;source:string;message?:string};
+  plan:null|{quantity:number;maxPriceMinor:number};
+  funding:{prepared:boolean;masterLabel:string;last4:string;provider:string;mode:"demo"};
+  recipients:Recipient[];
+  invalidRecipients:{rowNumber:number;error:string}[];
+  uploadFile:string|null;
+  orders:Order[];
+}={
+  product:null,
+  plan:null,
+  funding:{prepared:false,masterLabel:"",last4:"",provider:"Demo issuer connector",mode:"demo"},
+  recipients:[],
+  invalidRecipients:[],
+  uploadFile:null,
+  orders:[]
+};
+
 const app=Fastify({logger:true});
-
 await app.register(multipart,{limits:{files:1,fileSize:8*1024*1024}});
 
-app.get("/health",async()=>({status:"ok",mode:"local-demo"}));
+function moneyMinor(value:unknown){
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0)throw new Error("Amount must be greater than zero");
+  return Math.round(n*100);
+}
 
+function snapshot(){
+  const counts:Record<string,number>={};
+  for(const order of state.orders)counts[order.status]=(counts[order.status]||0)+1;
+  return {
+    ...state,
+    summary:{
+      totalOrders:state.orders.length,
+      totalUnits:state.orders.reduce((n,o)=>n+o.quantity,0),
+      expectedMinor:state.orders.reduce((n,o)=>n+o.expectedMinor,0),
+      actionRequired:(counts.OTP_REQUIRED||0)+(counts.PAYMENT_AUTH_REQUIRED||0),
+      confirmed:counts.CONFIRMED||0,
+      counts
+    }
+  };
+}
+
+function setStatus(order:Order,status:OrderStatus){
+  order.status=status;
+  order.updatedAt=new Date().toISOString();
+  order.history.push({status,at:order.updatedAt});
+}
+
+function advanceOrder(order:Order){
+  if(["OTP_REQUIRED","PAYMENT_AUTH_REQUIRED","CONFIRMED","FAILED"].includes(order.status))return;
+  switch(order.status){
+    case "QUEUED": return setStatus(order,"PRODUCT_CHECK");
+    case "PRODUCT_CHECK": return setStatus(order,"CART");
+    case "CART": return setStatus(order,"ADDRESS");
+    case "ADDRESS": return setStatus(order,"CARD_READY");
+    case "CARD_READY": return setStatus(order,"PAYMENT");
+    case "PAYMENT":
+      if(order.authCleared)return setStatus(order,"CONFIRMING");
+      if(order.sequence%7===0)return setStatus(order,"OTP_REQUIRED");
+      if(order.sequence%5===0)return setStatus(order,"PAYMENT_AUTH_REQUIRED");
+      return setStatus(order,"CONFIRMING");
+    case "CONFIRMING":
+      order.demoOrderRef="DEMO-ORDER-"+String(order.sequence).padStart(4,"0");
+      return setStatus(order,"CONFIRMED");
+  }
+}
+
+app.get("/health",async()=>({status:"ok",mode:"local-workflow-demo"}));
+app.get("/api/state",async()=>snapshot());
 app.get("/api/template.csv",async(_req,reply)=>{
   reply.header("content-type","text/csv; charset=utf-8");
-  reply.header("content-disposition",'attachment; filename="bulkorder-template.csv"');
+  reply.header("content-disposition",'attachment; filename="bulkorder-customers.csv"');
   return templateCsv;
 });
 
-app.post("/api/imports",async(req,reply)=>{
-  const file=await req.file();
-  if(!file)return reply.code(400).send({error:"file_required"});
-  if(!/\.(xlsx|xls|csv)$/i.test(file.filename||""))return reply.code(415).send({error:"unsupported_file_type"});
-  const buffer=await file.toBuffer();
-  let rows;
-  try{rows=parseSpreadsheet(buffer)}
-  catch(error:any){return reply.code(422).send({error:String(error?.message||"spreadsheet_parse_failed")})}
-  if(!rows.length)return reply.code(422).send({error:"spreadsheet_has_no_data_rows"});
+app.post("/api/product/check",async(req,reply)=>{
+  const url=String((req.body as any)?.url||"").trim();
+  if(!validateFlipkartUrl(url))return reply.code(400).send({error:"Enter a valid https://flipkart.com product link"});
+  const product=await fetchFlipkartProduct(url);
+  state.product=product;
+  state.plan=null;
+  state.orders=[];
+  return {product};
+});
 
-  const record:ImportRecord={
-    id:randomUUID(),
-    filename:file.filename||"upload.xlsx",
-    createdAt:new Date().toISOString(),
-    tasks:rows.map(row=>{
-      if(!row.ok||!row.data){
-        return {
-          id:randomUUID(),rowNumber:row.rowNumber,userId:"INVALID",fullName:"",mobile:"",
-          address:"",city:"",state:"",pincode:"",productUrl:"",quantity:0,maxPriceMinor:0,
-          status:"INVALID" as const,error:row.error||"Invalid row"
-        };
-      }
-      const d=row.data;
-      return {
-        id:randomUUID(),rowNumber:row.rowNumber,userId:d.userId,fullName:d.fullName,mobile:d.mobile,
-        address:[d.addressLine1,d.addressLine2].filter(Boolean).join(", "),city:d.city,state:d.state,pincode:d.pincode,
-        productUrl:d.productUrl,quantity:d.quantity,maxPriceMinor:d.maxPriceMinor,status:"READY" as const
-      };
-    })
+app.post("/api/product/plan",async(req,reply)=>{
+  const body=(req.body as any)||{};
+  const url=String(body.url||state.product?.url||"").trim();
+  if(!validateFlipkartUrl(url))return reply.code(400).send({error:"Valid Flipkart URL required"});
+  const title=String(body.title||state.product?.title||"Flipkart product").trim().slice(0,240);
+  let priceMinor:number;
+  let maxPriceMinor:number;
+  try{
+    priceMinor=moneyMinor(body.price);
+    maxPriceMinor=moneyMinor(body.maxPrice);
+  }catch(error:any){return reply.code(400).send({error:error.message})}
+  const quantity=Number(body.quantity);
+  if(!Number.isInteger(quantity)||quantity<1||quantity>10000)return reply.code(400).send({error:"Quantity must be 1 to 10000"});
+  if(maxPriceMinor<priceMinor)return reply.code(400).send({error:"Maximum price cannot be below current price"});
+  state.product={url,title,image:state.product?.image||null,priceMinor,source:state.product?.source||"manual",message:state.product?.message};
+  state.plan={quantity,maxPriceMinor};
+  state.orders=[];
+  return snapshot();
+});
+
+app.post("/api/funding/prepare",async(req,reply)=>{
+  const body=(req.body as any)||{};
+  if(!state.plan||!state.product?.priceMinor)return reply.code(409).send({error:"Configure product and quantity first"});
+  const last4=String(body.last4||"").trim();
+  if(last4&&!/^\d{4}$/.test(last4))return reply.code(400).send({error:"Enter only the last 4 digits of the master funding card"});
+  state.funding={
+    prepared:true,
+    masterLabel:String(body.masterLabel||"Master corporate funding").trim().slice(0,80),
+    last4,
+    provider:"Demo issuer connector",
+    mode:"demo"
   };
-  imports.unshift(record);
-  return reply.code(201).send(summary(record));
+  state.orders=[];
+  return snapshot();
 });
 
-app.get("/api/imports",async()=>({imports:imports.map(summary)}));
-
-app.get("/api/imports/:id",async(req,reply)=>{
-  const id=String((req.params as any).id);
-  const found=imports.find(x=>x.id===id);
-  if(!found)return reply.code(404).send({error:"import_not_found"});
-  return {import:summary(found),tasks:found.tasks};
-});
-
-app.post("/api/tasks/:id/start",async(req,reply)=>{
-  const id=String((req.params as any).id);
-  for(const item of imports){
-    const task=item.tasks.find(x=>x.id===id);
-    if(!task)continue;
-    if(task.status==="INVALID")return reply.code(409).send({error:"invalid_task"});
-    task.status="STARTED";
-    return {ok:true,task};
+app.post("/api/recipients",async(req,reply)=>{
+  const file=await req.file();
+  if(!file)return reply.code(400).send({error:"Excel/CSV file required"});
+  if(!/\.(xlsx|xls|csv)$/i.test(file.filename||""))return reply.code(415).send({error:"Use .xlsx, .xls or .csv"});
+  let rows;
+  try{rows=parseRecipients(await file.toBuffer())}
+  catch(error:any){return reply.code(422).send({error:String(error?.message||"Could not read spreadsheet")})}
+  const recipients:Recipient[]=[];
+  const invalid:{rowNumber:number;error:string}[]=[];
+  for(const row of rows){
+    if(!row.ok||!row.data){invalid.push({rowNumber:row.rowNumber,error:row.error||"Invalid row"});continue}
+    const d=row.data;
+    recipients.push({
+      id:randomUUID(),rowNumber:row.rowNumber,userId:d.userId,fullName:d.fullName,mobile:d.mobile,
+      addressLine1:d.addressLine1,addressLine2:d.addressLine2,city:d.city,state:d.state,pincode:d.pincode
+    });
   }
-  return reply.code(404).send({error:"task_not_found"});
+  state.recipients=recipients;
+  state.invalidRecipients=invalid;
+  state.uploadFile=file.filename||"customers.xlsx";
+  state.orders=[];
+  return snapshot();
 });
 
-function summary(record:ImportRecord){
-  const valid=record.tasks.filter(x=>x.status!=="INVALID").length;
-  const invalid=record.tasks.length-valid;
-  const started=record.tasks.filter(x=>x.status==="STARTED").length;
-  return {id:record.id,filename:record.filename,createdAt:record.createdAt,total:record.tasks.length,valid,invalid,started};
-}
+app.post("/api/orders/create",async(_req,reply)=>{
+  if(!state.product?.priceMinor||!state.plan)return reply.code(409).send({error:"Product plan is not ready"});
+  if(!state.funding.prepared)return reply.code(409).send({error:"Prepare funding first"});
+  if(!state.recipients.length)return reply.code(409).send({error:"Upload at least one valid customer"});
+  const allocations=state.recipients.map(()=>0);
+  for(let i=0;i<state.plan.quantity;i++)allocations[i%allocations.length]++;
+  const orders:Order[]=[];
+  let sequence=1;
+  allocations.forEach((qty,index)=>{
+    if(qty<1)return;
+    const recipient=state.recipients[index];
+    const expectedMinor=state.product!.priceMinor!*qty;
+    const absoluteMax=state.plan!.maxPriceMinor*qty;
+    const buffered=Math.ceil(expectedMinor*1.03/100)*100;
+    const cardLimitMinor=Math.min(absoluteMax,buffered);
+    const now=new Date().toISOString();
+    orders.push({
+      id:randomUUID(),sequence,userId:recipient.userId,recipient,quantity:qty,
+      expectedMinor,maxMinor:absoluteMax,cardLimitMinor,
+      virtualCardRef:"DEMO-VC-"+String(sequence).padStart(4,"0"),
+      cardStatus:"DEMO_READY",status:"QUEUED",authCleared:false,demoOrderRef:null,
+      updatedAt:now,history:[{status:"QUEUED",at:now}]
+    });
+    sequence++;
+  });
+  state.orders=orders;
+  return snapshot();
+});
+
+app.post("/api/orders/:id/advance",async(req,reply)=>{
+  const order=state.orders.find(x=>x.id===String((req.params as any).id));
+  if(!order)return reply.code(404).send({error:"Order not found"});
+  advanceOrder(order);
+  return {order};
+});
+
+app.post("/api/batch/tick",async()=>{
+  const candidates=state.orders.filter(o=>!["OTP_REQUIRED","PAYMENT_AUTH_REQUIRED","CONFIRMED","FAILED"].includes(o.status)).slice(0,4);
+  for(const order of candidates)advanceOrder(order);
+  return snapshot();
+});
+
+app.post("/api/orders/:id/action",async(req,reply)=>{
+  const order=state.orders.find(x=>x.id===String((req.params as any).id));
+  if(!order)return reply.code(404).send({error:"Order not found"});
+  if(!["OTP_REQUIRED","PAYMENT_AUTH_REQUIRED"].includes(order.status))return reply.code(409).send({error:"This order is not waiting for verification"});
+  const code=String((req.body as any)?.code||"").trim();
+  if(!/^\d{4,8}$/.test(code))return reply.code(400).send({error:"Enter the verification code shown for this checkout"});
+  // Demo only: the code is deliberately not stored or logged.
+  order.authCleared=true;
+  setStatus(order,"CONFIRMING");
+  return {order};
+});
+
+app.post("/api/reset",async()=>{
+  state.product=null;state.plan=null;state.funding={prepared:false,masterLabel:"",last4:"",provider:"Demo issuer connector",mode:"demo"};
+  state.recipients=[];state.invalidRecipients=[];state.uploadFile=null;state.orders=[];
+  return snapshot();
+});
 
 app.get("/",async(_req,reply)=>{
   reply.type("text/html; charset=utf-8");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BulkOrder</title><style>
-body{font-family:Arial,sans-serif;background:#f4f6f8;margin:0;color:#111}.wrap{max-width:1100px;margin:40px auto;padding:0 18px}
-.card{background:#fff;border:1px solid #ddd;border-radius:14px;padding:22px;margin-bottom:18px}.drop{border:2px dashed #bbb;border-radius:12px;padding:28px;text-align:center}
-button,.btn{background:#111;color:#fff;border:0;border-radius:8px;padding:10px 14px;text-decoration:none;cursor:pointer}input{margin:12px}
-table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #eee;padding:9px;text-align:left;vertical-align:top}
-.bad{color:#b42318}.good{color:#08783f}.muted{color:#667085;font-size:13px}.stats{display:flex;gap:12px;flex-wrap:wrap}.stat{background:#f7f7f8;padding:10px 14px;border-radius:10px}
-a{color:#175cd3}
-</style></head><body><div class="wrap">
-<div class="card"><h1>BulkOrder</h1><p>Upload Excel/CSV and see one backend task created for every valid row.</p>
-<div class="drop"><form id="form"><input id="file" type="file" accept=".xlsx,.xls,.csv" required><br>
-<button>Upload Excel</button> <a class="btn" href="/api/template.csv">Download template</a></form><p id="msg" class="muted"></p></div></div>
-<div class="card"><h2>Imports</h2><div id="imports">No uploads yet.</div></div>
-<div class="card" id="detailCard" style="display:none"><h2>Rows / Tasks</h2><div id="detail"></div></div>
-</div><script>
-const money=n=>'₹'+(Number(n||0)/100).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-async function load(){
- const d=await fetch('/api/imports').then(r=>r.json());
- if(!d.imports.length){imports.innerHTML='<p>No uploads yet.</p>';return}
- imports.innerHTML='<table><tr><th>File</th><th>Total</th><th>Valid</th><th>Invalid</th><th>Started</th></tr>'+
- d.imports.map(x=>`<tr onclick="showImport('${x.id}')" style="cursor:pointer"><td>${x.filename}</td><td>${x.total}</td><td>${x.valid}</td><td>${x.invalid}</td><td>${x.started}</td></tr>`).join('')+'</table>';
-}
-async function showImport(id){
- const d=await fetch('/api/imports/'+id).then(r=>r.json());detailCard.style.display='block';
- detail.innerHTML='<div class="stats"><div class="stat">Total <b>'+d.import.total+'</b></div><div class="stat">Valid <b>'+d.import.valid+'</b></div><div class="stat">Invalid <b>'+d.import.invalid+'</b></div><div class="stat">Started <b>'+d.import.started+'</b></div></div><br>'+
- '<table><tr><th>Row</th><th>User</th><th>Address</th><th>Pin</th><th>Product</th><th>Qty</th><th>Max</th><th>Status</th><th></th></tr>'+
- d.tasks.map(t=>`<tr><td>${t.rowNumber}</td><td>${t.userId}</td><td>${t.address||''}<br>${t.city||''} ${t.state||''}</td><td>${t.pincode||''}</td><td>${t.productUrl?'<a href="'+t.productUrl+'" target="_blank">Open Flipkart</a>':''}</td><td>${t.quantity||''}</td><td>${t.maxPriceMinor?money(t.maxPriceMinor):''}</td><td class="${t.status==='INVALID'?'bad':'good'}">${t.status}${t.error?'<br>'+t.error:''}</td><td>${t.status==='READY'?'<button onclick="startTask(\''+t.id+'\')">Start</button>':''}</td></tr>`).join('')+'</table>';
-}
-async function startTask(id){await fetch('/api/tasks/'+id+'/start',{method:'POST'});const current=document.querySelector('#detailCard');await load();current.scrollIntoView()}
-form.onsubmit=async e=>{e.preventDefault();msg.textContent='Reading file…';const fd=new FormData();fd.append('file',file.files[0]);const r=await fetch('/api/imports',{method:'POST',body:fd});const j=await r.json();msg.textContent=r.ok?'Uploaded. '+j.valid+' valid rows, '+j.invalid+' invalid rows.':(j.error||'Upload failed');await load();if(r.ok)showImport(j.id)};
-load();
-</script></body></html>`;
+  return renderUi();
 });
 
 const port=Number(process.env.PORT||3000);
 await app.listen({host:"0.0.0.0",port});
-console.log(`BulkOrder running at http://localhost:${port}`);
+console.log("BulkOrder running at http://localhost:"+port);
