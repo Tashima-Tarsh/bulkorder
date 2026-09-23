@@ -1,5 +1,5 @@
 export function renderUi(){
-return String.raw\`<!doctype html>
+return String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -173,7 +173,7 @@ function renderMetrics(){
 function renderOrders(){
   if(!state.orders.length){document.getElementById('orders').innerHTML='<div class="empty">Create child orders after product, funding and Excel are ready.</div>';return}
   var rows=state.orders.map(function(o){
-    return '<tr onclick="openOrder(\\''+o.id+'\\')" style="cursor:pointer"><td class="mono">#'+String(o.sequence).padStart(3,'0')+'</td><td><b>'+escapeHtml(o.userId)+'</b><br><span class="small">'+escapeHtml(o.recipient.city)+' · '+escapeHtml(o.recipient.pincode)+'</span></td><td>'+o.quantity+'</td><td>'+money(o.expectedMinor)+'</td><td class="mono">'+escapeHtml(o.virtualCardRef)+'</td><td><span class="status s-'+o.status+'">'+o.status.replaceAll('_',' ')+'</span></td><td><button class="btn btnGhost" onclick="event.stopPropagation();advance(\\''+o.id+'\\')">Advance</button></td></tr>';
+    return '<tr onclick="openOrder(\''+o.id+'\')" style="cursor:pointer"><td class="mono">#'+String(o.sequence).padStart(3,'0')+'</td><td><b>'+escapeHtml(o.userId)+'</b><br><span class="small">'+escapeHtml(o.recipient.city)+' · '+escapeHtml(o.recipient.pincode)+'</span></td><td>'+o.quantity+'</td><td>'+money(o.expectedMinor)+'</td><td class="mono">'+escapeHtml(o.virtualCardRef)+'</td><td><span class="status s-'+o.status+'">'+o.status.replaceAll('_',' ')+'</span></td><td><button class="btn btnGhost" onclick="event.stopPropagation();advance(\''+o.id+'\')">Advance</button></td></tr>';
   }).join('');
   document.getElementById('orders').innerHTML='<div class="ordersWrap"><table><thead><tr><th>Order</th><th>Customer</th><th>Qty</th><th>Expected</th><th>Virtual card</th><th>Status</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
@@ -257,7 +257,7 @@ function openOrder(id){
   var timeline=stages.map(function(s,i){return '<div class="node '+(i<=idx?'on':'')+'" title="'+s+'"></div>'}).join('');
   var action='';
   if(o.status==='OTP_REQUIRED'||o.status==='PAYMENT_AUTH_REQUIRED'){
-    action='<div class="actionBox"><h3>'+(o.status==='OTP_REQUIRED'?'Flipkart verification required':'Bank / 3DS verification required')+'</h3><p>This demo pauses only this child order. Enter a 4–8 digit code to demonstrate resuming the same checkout. The code is not stored.</p><input id="actionCode" class="input" inputmode="numeric" maxlength="8" placeholder="Enter verification code"><button class="btn btnPrimary" style="margin-top:9px" onclick="submitAction(\\''+o.id+'\\')">Verify & resume</button></div>';
+    action='<div class="actionBox"><h3>'+(o.status==='OTP_REQUIRED'?'Flipkart verification required':'Bank / 3DS verification required')+'</h3><p>This demo pauses only this child order. Enter a 4–8 digit code to demonstrate resuming the same checkout. The code is not stored.</p><input id="actionCode" class="input" inputmode="numeric" maxlength="8" placeholder="Enter verification code"><button class="btn btnPrimary" style="margin-top:9px" onclick="submitAction(\''+o.id+'\')">Verify & resume</button></div>';
   }
   document.getElementById('drawerBody').innerHTML='<div class="eyebrow">ORDER #'+String(o.sequence).padStart(3,'0')+'</div><h2>'+escapeHtml(o.userId)+'</h2><div class="status s-'+o.status+'" style="display:inline-block">'+o.status.replaceAll('_',' ')+'</div><div class="timeline">'+timeline+'</div>'+
     '<div class="card" style="box-shadow:none"><div class="cardBody"><div class="small">DELIVERY</div><b>'+escapeHtml(o.recipient.fullName||o.userId)+'</b><div class="hint">'+escapeHtml(o.recipient.addressLine1)+(o.recipient.addressLine2?', '+escapeHtml(o.recipient.addressLine2):'')+'<br>'+escapeHtml(o.recipient.city)+', '+escapeHtml(o.recipient.state)+' '+escapeHtml(o.recipient.pincode)+'</div><div class="divider"></div><div class="row"><div><div class="small">QUANTITY</div><b>'+o.quantity+'</b></div><div><div class="small">EXPECTED</div><b>'+money(o.expectedMinor)+'</b></div></div><div class="divider"></div><div class="small">VIRTUAL CARD</div><b class="mono">'+escapeHtml(o.virtualCardRef)+'</b><div class="hint">Demo reference · limit '+money(o.cardLimitMinor)+'</div></div></div>'+action+
@@ -276,5 +276,5 @@ async function resetAll(){if(runner){clearInterval(runner);runner=null}await api
 function escapeHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 refresh();
 </script>
-</body></html>\`;
+</body></html>`;
 }
