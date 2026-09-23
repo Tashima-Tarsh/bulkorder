@@ -5,26 +5,18 @@
   "type": "module",
   "engines": { "node": "24.x" },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/src/server.js",
-    "worker": "node dist/src/worker.js",
-    "migrate": "node dist/src/migrate.js",
+    "dev": "tsx src/server.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@fastify/multipart": "^9.2.1",
-    "bullmq": "^5.58.5",
     "fastify": "^5.6.0",
-    "ioredis": "^5.7.0",
-    "pg": "^8.16.3",
     "xlsx": "^0.18.5",
     "zod": "^4.1.8"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
-    "@types/pg": "^8.15.5",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }
